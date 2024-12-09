@@ -1,0 +1,13 @@
+# compiled output
+node_modules/
+volume
+.env
+
+# Logs
+logs
+*.log
+
+.vscode
+
+/test.js
+/src/infrastructure/storage
