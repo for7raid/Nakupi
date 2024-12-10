@@ -14,6 +14,7 @@ export interface BotContext extends Context {
   match?: RegExpExecArray | null;
   message: any;
   from: any;
+  callbackQuery: any;
 }
 
 export enum BotActions {
