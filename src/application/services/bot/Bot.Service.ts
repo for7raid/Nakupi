@@ -7,10 +7,12 @@ import { IBotService } from "../../../domain/interfaces/services/IBotService";
 import { CategoryHandler } from "./handlers/CategoryHandler";
 import { ItemHandler } from "./handlers/ItemHandler";
 import { User } from "../../../domain/entities/User";
+import LocalSession from "telegraf-session-local";
 
 @injectable()
 export class BotService implements IBotService {
   private bot!: Telegraf<BotContext>;
+  private localSession!: LocalSession<BotContext>;
   
   constructor(
     @inject("IUserRepository") private userRepository: IUserRepository,
@@ -25,14 +27,18 @@ export class BotService implements IBotService {
 
     this.bot = new Telegraf<BotContext>(token);
 
-    // Middleware to handle session
-    this.bot.use((ctx: BotContext, next: () => Promise<void>) => {
-      if (ctx.from?.id && !ctx.session) {
-        ctx.session = {};
-        console.log('Session initialized for user:', ctx.from.id);
-      }
-      return next();
+    // Session middleware
+    this.localSession = new LocalSession({
+      database: 'sessions.json',
+      property: 'session',
+      storage: LocalSession.storageFileSync,
+      format: {
+        serialize: (obj: any) => JSON.stringify(obj, null, 2),
+        deserialize: (str: string) => JSON.parse(str),
+      },
+      state: { }
     });
+    this.bot.use(this.localSession.middleware());
 
     // Command handlers
     this.bot.command('start', (ctx: BotContext) => this.handleStart(ctx));
@@ -40,16 +46,26 @@ export class BotService implements IBotService {
     // Action handlers
     this.bot.action(new RegExp(`^${BotActions.SELECT_CATEGORY}:(.+)$`), (ctx: BotContext) => this.handleSelectCategory(ctx));
     this.bot.action(BotActions.DELETE_CATEGORY, (ctx: BotContext) => this.categoryHandler.handleDeleteCategory(ctx));
-    this.bot.action(BotActions.ADD_CATEGORY, (ctx: BotContext) => this.categoryHandler.handleAddCategory(ctx));
+    this.bot.action(BotActions.ADD_CATEGORY, (ctx: BotContext) => this.categoryHandler.requestAddCategory(ctx));
     this.bot.action(BotActions.BACK_TO_CATEGORIES, (ctx: BotContext) => this.showMainMenu(ctx));
     this.bot.action(new RegExp(`^${BotActions.TOGGLE_ITEM}:(.+)$`), (ctx: BotContext) => this.itemHandler.handleToggleItem(ctx));
-    this.bot.action(new RegExp(`^${BotActions.ADD_ITEM}:(.+)$`), (ctx: BotContext) => this.itemHandler.handleAddItem(ctx));
+    this.bot.action(new RegExp(`^${BotActions.ADD_ITEM}:(.+)$`), async (ctx: BotContext) => {
+      const categoryId = ctx.match?.[1];
+      if (categoryId) {
+        await this.itemHandler.requestAddItem(ctx, categoryId);
+      }
+    });
+    this.bot.action(BotActions.BACK_TO_ITEMS, async (ctx: BotContext) => {
+      const categoryId = ctx.session?.selectedCategoryId;
+      if (categoryId) {
+        await this.itemHandler.showCategoryItems(ctx, categoryId);
+      }
+    });
 
     // Message handlers
     this.bot.on('text', (ctx: BotContext) => this.handleText(ctx));
 
     try {
-      await connectToDatabase();
       await this.bot.launch();
       console.log('🚀 Bot successfully started');
     } catch (error) {
@@ -84,15 +100,14 @@ export class BotService implements IBotService {
   }
 
   private async handleSelectCategory(ctx: BotContext): Promise<void> {
-    const categoryId = ctx.callbackQuery?.data as string; // Use string type directly
-    console.log(`Selected category ID: ${categoryId}`); // Log the selected category ID
+
+    const categoryId = ctx.match ? ctx.match[1] : undefined; 
 
     if (categoryId) {
-        ctx.session.currentCategoryId = categoryId;
-        console.log(`Current category ID set in session: ${ctx.session.currentCategoryId}`); // Log setting the category ID
-
-        await ctx.reply('Вы выбрали категорию. Теперь введите название товара:');
-        ctx.session.isAddingItem = true;
+        ctx.session.selectedCategoryId = categoryId;
+        console.log(`Current category ID set in session: ${ctx.session.selectedCategoryId}`); // Log setting the category ID
+        
+        this.itemHandler.showCategoryItems(ctx, categoryId);
     } else {
         await ctx.reply('❌ Ошибка при выборе категории. Пожалуйста, попробуйте снова.');
     }
@@ -102,18 +117,17 @@ export class BotService implements IBotService {
     const text = ctx.message?.text;
     const userId = ctx.from?.id.toString();
 
-    console.log(`Received text: ${text}`); // Log the received text
-    console.log(`Session state: ${JSON.stringify(ctx.session)}`); // Log the session state
+    console.log(`Received text: ${text}`);
+    console.log(`Session state:`, ctx.session);
 
     if (!text || !userId) {
       return;
     }
-    
-    console.log(ctx.session?.isAddingItem)
 
     try {
       if (ctx.session?.isAddingCategory) {
-        const newCategory = await this.categoryHandler.handleAddCategory(ctx);
+        console.log('Creating category...');
+        await this.categoryHandler.createCategory(ctx);
         ctx.session.isAddingCategory = false;
         await this.showMainMenu(ctx);
         return;
@@ -121,6 +135,7 @@ export class BotService implements IBotService {
 
       if (ctx.session?.isAddingItem) {
         await this.itemHandler.handleAddItem(ctx);
+        ctx.session.isAddingItem = false;
         return;
       }
     } catch (error) {
@@ -130,6 +145,10 @@ export class BotService implements IBotService {
   }
 
   private async showMainMenu(ctx: BotContext): Promise<void> {
+    
+    ctx.session.isAddingCategory = false;
+    ctx.session.isAddingItem = false;
+
     try {
       const userId = ctx.from?.id.toString();
       if (!userId) throw new Error('User ID not found');

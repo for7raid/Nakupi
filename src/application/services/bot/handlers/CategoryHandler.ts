@@ -1,22 +1,28 @@
-import { Markup } from "telegraf";
 import { inject, injectable } from "tsyringe";
+import { Markup } from "telegraf";
 import { BaseHandler } from "./BaseHandler";
 import { BotContext, BotActions } from "../../../../application/types/telegram.types";
 import { ICategoriesService } from "../../../../domain/interfaces/services/ICategoriesService";
 import { Category } from "../../../../domain/entities/Category";
+import { UserId } from "../../../../domain/value-objects/UserId";
 
 @injectable()
 export class CategoryHandler extends BaseHandler {
   constructor(
-    @inject("ICategoriesService") private categoriesService: ICategoriesService
+    @inject("ICategoriesService") private readonly categoriesService: ICategoriesService
   ) {
     super();
   }
 
-  async handleAddCategory(ctx: BotContext): Promise<void> {
+  async requestAddCategory(ctx: BotContext): Promise<void> {
     try {
-      this.ensureSession(ctx);
+      if (!ctx.session) {
+        ctx.session = {};
+      }
+      
       ctx.session.isAddingCategory = true;
+      await this.saveSession(ctx);
+      console.log('Session state after setting flag:', ctx.session);
 
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('⬅️ Отмена', BotActions.BACK_TO_CATEGORIES)]
@@ -24,6 +30,31 @@ export class CategoryHandler extends BaseHandler {
 
       await ctx.reply('Введите название новой категории:', keyboard);
     } catch (error) {
+      console.error('Error in requestAddCategory:', error);
+      await this.handleError(ctx, error);
+    }
+  }
+
+  async createCategory(ctx: BotContext): Promise<Category | void> {
+    try {
+      const text = ctx.message?.text;
+      const userId = ctx.from?.id.toString();
+
+      if (!text || !userId) {
+        return;
+      }
+
+      console.log(`Creating category with name: ${text} for user: ${userId}`);
+      const category: Category = await this.categoriesService.create(text, userId);
+      console.log(`Category created:`, category);
+      
+      ctx.session.isAddingCategory = false;
+      await this.saveSession(ctx);
+      
+      await ctx.reply(`✅ Категория "${text}" успешно создана!`);
+      return category;
+    } catch (error) {
+      console.error('Error creating category:', error);
       await this.handleError(ctx, error);
     }
   }

@@ -1,8 +1,7 @@
 import { Context } from 'telegraf';
 
 export interface SessionData {
-  currentCategoryId?: string | null;
-  selectedCategoryId?: string;
+  selectedCategoryId?: string | null;
   isAddingCategory?: boolean;
   isAddingItem?: boolean;
   showCompletedItems?: boolean;
@@ -26,5 +25,6 @@ export enum BotActions {
   TOGGLE_ITEM = 'toggle_item',
   SHOW_COMPLETED = 'show_completed',
   BACK_TO_CATEGORIES = 'back_to_categories',
+  BACK_TO_ITEMS = 'back_to_items',
   MANAGE_CATEGORIES = 'manage_categories'
 }
