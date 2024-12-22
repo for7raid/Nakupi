@@ -5,11 +5,13 @@ import { CategoryId } from "../../../domain/value-objects/CategoryId";
 import { UserId } from "../../../domain/value-objects/UserId";
 import { DomainError } from "../../../domain/errors/DomainError";
 import { ICategoriesService } from "../../../domain/interfaces/services/ICategoriesService";
+import { IItemsRepository } from "../../../domain/interfaces/repositories/IItemsRepository";
 
 @injectable()
 export class CategoriesService implements ICategoriesService {
     constructor(
-        @inject("ICategoriesRepository") private readonly categoriesRepository: ICategoriesRepository
+        @inject("ICategoriesRepository") private readonly categoriesRepository: ICategoriesRepository,
+        @inject("IItemsRepository") private readonly itemsRepository: IItemsRepository
     ) {}
 
     async getList(userId: string): Promise<Category[]> {
@@ -26,6 +28,11 @@ export class CategoriesService implements ICategoriesService {
         const categoryId = CategoryId.from(id);
         const category = await this.categoriesRepository.findById(categoryId);
         if (!category) throw new DomainError("Category not found");
+        
+        // Сначала удаляем все товары в категории
+        await this.itemsRepository.deleteByCategoryId(categoryId);
+        
+        // Затем удаляем саму категорию
         await this.categoriesRepository.delete(categoryId);
     }
 

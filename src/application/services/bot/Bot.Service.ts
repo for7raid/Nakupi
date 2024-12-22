@@ -45,7 +45,7 @@ export class BotService implements IBotService {
 
     // Action handlers
     this.bot.action(new RegExp(`^${BotActions.SELECT_CATEGORY}:(.+)$`), (ctx: BotContext) => this.handleSelectCategory(ctx));
-    this.bot.action(BotActions.DELETE_CATEGORY, (ctx: BotContext) => this.categoryHandler.handleDeleteCategory(ctx));
+    this.bot.action(/^delete_category_(.+)$/, (ctx: BotContext) => this.categoryHandler.handleDeleteCategory(ctx));
     this.bot.action(BotActions.ADD_CATEGORY, (ctx: BotContext) => this.categoryHandler.requestAddCategory(ctx));
     this.bot.action(BotActions.BACK_TO_CATEGORIES, (ctx: BotContext) => this.showMainMenu(ctx));
     this.bot.action(new RegExp(`^${BotActions.TOGGLE_ITEM}:(.+)$`), (ctx: BotContext) => this.itemHandler.handleToggleItem(ctx));
@@ -59,6 +59,13 @@ export class BotService implements IBotService {
       const categoryId = ctx.session?.selectedCategoryId;
       if (categoryId) {
         await this.itemHandler.showCategoryItems(ctx, categoryId);
+      }
+    });
+    this.bot.action(new RegExp(`^${BotActions.SHOW_COMPLETED}:(.+)$`), async (ctx: BotContext) => {
+      const categoryId = ctx.match?.[1];
+      if (categoryId) {
+        ctx.session.showCompletedItems = !ctx.session.showCompletedItems;
+        await this.itemHandler.showCategoryItems(ctx, categoryId, ctx.session.showCompletedItems);
       }
     });
 

@@ -84,9 +84,8 @@ export class MongoDBCategoryRepository implements ICategoriesRepository {
 
             console.log(`Deleting category by id: ${id.toString()}`);
             
-            await this.repository.deleteOne({ _id: new ObjectId(id.toString()) });
-
-            console.log(`Category deleted successfully`);
+            const result = await this.repository.delete({ _id: new ObjectId(id.toString()) } as any);
+            console.log(`Category deleted successfully, affected rows: ${result.affected}`);
         } catch (error) {
             console.error('Error in delete:', error);
             throw error;

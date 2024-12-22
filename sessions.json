@@ -5,7 +5,8 @@
       "data": {
         "isAddingCategory": false,
         "selectedCategoryId": "675ecb653ade3af971ca118e",
-        "isAddingItem": false
+        "isAddingItem": false,
+        "showCompletedItems": true
       }
     }
   ]

@@ -105,28 +105,33 @@ export class ItemHandler extends BaseHandler {
       console.log('Show category items for category:', CategoryId.from(categoryId));
 
       const items = await this.itemRepositories.findByCategoryId(CategoryId.from(categoryId));
-      const filteredItems = showCompleted ? items : items.filter(item => !item.isCompleted);
+      const filteredItems = items.filter(item => item.isCompleted === showCompleted);
 
-      let message = filteredItems.length > 0 ? 'Товары в категории:\n\n' : 'В этой категории пока нет товаров.';
+      let message = filteredItems.length > 0 
+        ? `${showCompleted ? 'Купленные' : 'Не купленные'} товары в категории:\n\n` 
+        : `В этой категории ${showCompleted ? 'нет купленных' : 'нет не купленных'} товаров.`;
       
       filteredItems.forEach((item, index) => {
-        const status = item.isCompleted ? '✅' : '⭕️';
-        message += `${index + 1}. ${status} ${item.name}\n`;
+        message += `${index + 1}. ${item.name}\n`;
       });
 
       const buttons = [
         [Markup.button.callback('➕ Добавить товар', `${BotActions.ADD_ITEM}:${categoryId}`)],
+        [Markup.button.callback(
+          `${showCompleted ? '📦 Показать некупленные' : '📦 Показать купленные'}`,
+          `${BotActions.SHOW_COMPLETED}:${categoryId}`
+        )],
         [Markup.button.callback('⬅️ К категориям', BotActions.BACK_TO_CATEGORIES)]
       ];
 
       if (filteredItems.length > 0) {
         buttons.unshift(
-          filteredItems.map(item => 
+          ...filteredItems.map(item => [
             Markup.button.callback(
               `${item.isCompleted ? '✅' : '⭕️'} ${item.name}`,
               `${BotActions.TOGGLE_ITEM}:${item.id}`
             )
-          )
+          ])
         );
       }
 

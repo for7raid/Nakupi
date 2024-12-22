@@ -25,7 +25,12 @@ export class MongoDBItemRepository implements IItemsRepository {
 
     async findById(id: string): Promise<Item | null> {
         try {
-            const model = await this.repository.findOneBy({ id: new ObjectId(id) });
+            const objectId = new ObjectId(id);
+            const model = await this.repository.findOne({
+                where: {
+                    _id: objectId
+                } as any
+            });
             if (!model) return null;
             return model.toDomain();
         } catch (error) {
@@ -56,7 +61,8 @@ export class MongoDBItemRepository implements IItemsRepository {
 
     async delete(id: string): Promise<void> {
         try {
-            await this.repository.delete({ id: new ObjectId(id) });
+            const result = await this.repository.delete({ _id: new ObjectId(id) } as any);
+            console.log(`Deleted item with ID ${id}, affected rows: ${result.affected}`);
         } catch (error) {
             console.error('Error deleting item:', error);
             throw error;
@@ -65,7 +71,8 @@ export class MongoDBItemRepository implements IItemsRepository {
 
     async deleteByCategoryId(categoryId: CategoryId): Promise<void> {
         try {
-            await this.repository.delete({ categoryId: categoryId.toString() });
+            const result = await this.repository.delete({ categoryId: categoryId.toString() } as any);
+            console.log(`Deleted items from category ${categoryId.toString()}, affected rows: ${result.affected}`);
         } catch (error) {
             console.error('Error deleting items by category:', error);
             throw error;
