@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Запустить бота",
+            "program": "${workspaceFolder}/src/index.ts", // Путь к entry point с ботом
+            "preLaunchTask": "tsc: build - tsconfig.json", // Задача для компиляции TypeScript
+            "outFiles": ["${workspaceFolder}/dist/**/*.js"], // Путь к скомпилированным JS файлам
+            "runtimeArgs": ["--inspect-brk"], // Запуск с поддержкой дебаггинга
+            "env": {
+                "NODE_ENV": "development" // Установка переменной окружения
+            }
+        }
+    ]
+}

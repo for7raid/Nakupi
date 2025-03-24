@@ -1,0 +1,11 @@
+{
+  "startCommands": 3,
+  "addCategoryCommands": 1,
+  "removeCategoryCommands": 0,
+  "addItemCommands": 0,
+  "markAsPurchasedCommands": 0,
+  "markAsNotPurchasedCommands": 0,
+  "activeUsers": [],
+  "errors": 109,
+  "startTime": "2025-03-24T13:17:39.811Z"
+}

@@ -1,13 +1,21 @@
-# compiled output
-node_modules/
-volume
-.env
+# dependencies
+/bot-service/node_modules
+/ui-service/node_modules
 
-# Logs
-logs
-*.log
+/bot-service/metrics
+/bot-service/logs
 
-.vscode
+# next.js
+/ui-service/.next/
+/ui-service/out/
 
-/test.js
-/src/infrastructure/storage
+# production
+/bot-service/dist
+/ui-service/build
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
