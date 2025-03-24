@@ -68,5 +68,4 @@ function loadConfig() {
     }
 }
 
-// Экспортируем конфигурацию
 export const config = loadConfig();

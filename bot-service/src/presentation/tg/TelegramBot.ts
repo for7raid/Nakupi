@@ -148,23 +148,20 @@ export class TelegramBot {
             const categoryScene = new CategoryScene(this.shoppingService);
 
             // Получаем экземпляры всех сцен
-            const mainMenuSceneInstance = mainMenuScene.getScene();
-            const manageCategoriesSceneInstance = manageCategoriesScene.getScene();
-            const addCategorySceneInstance = manageCategoriesScene.getAddCategoryScene();
-            const categorySceneInstance = categoryScene.getCategoryScene();
-            const showPurchasedSceneInstance = categoryScene.getShowPurchasedScene();
+            
+            const scenes = [
+                mainMenuScene.getScene(),
+                manageCategoriesScene.getScene(),
+                manageCategoriesScene.getAddCategoryScene(),
+                categoryScene.getCategoryScene(),
+                categoryScene.getShowPurchasedScene()
+            ];
 
             // Создаем Stage с добавлением всех сцен
-            this.stage = new Scenes.Stage<BotContext>([
-                mainMenuSceneInstance,
-                manageCategoriesSceneInstance,
-                addCategorySceneInstance,
-                categorySceneInstance,
-                showPurchasedSceneInstance
-            ]);
+            this.stage = new Scenes.Stage<BotContext>(scenes);
 
             logger.info('Сцены бота успешно инициализированы', {
-                scenesCount: 5
+                scenesCount: scenes.length
             });
         } catch (error) {
             logger.error('Ошибка при инициализации сцен бота:', error);

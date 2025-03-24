@@ -22,6 +22,7 @@ export class ShoppingList {
     }
 }
 
+// TODO: избавиться
 export class ShoppingListRepository implements IShoppingListRepository {
     protected db: Db | null = null;
     protected mongoConn: MongoConnection;
