@@ -10,8 +10,15 @@
     "rootDir": "./src",                       // Указывает корневую директорию исходных файлов
     "baseUrl": "./",                          // Указывает базовый URL для разрешения модулей
     "paths": {
-      "*": ["node_modules/*", "src/types/*"] // Указывает пути для разрешения модулей
-    }
+      "@/*": ["src/*"],
+      "@domain/*": ["src/domain/*"],
+      "@application/*": ["src/application/*"],
+      "@infrastructure/*": ["src/infrastructure/*"],
+      "@presentation/*": ["src/presentation/*"],
+      "@config/*": ["src/config/*"],
+      "@test/*": ["src/test/*"]
+    },
+    "types": ["node", "jest"]                // Добавляем типы Jest для распознавания в тестах
   },
   "include": [
     "src/**/*"                                // Включает все файлы в папке src

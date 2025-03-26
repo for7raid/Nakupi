@@ -1,11 +1,11 @@
 {
-  "startCommands": 3,
-  "addCategoryCommands": 1,
-  "removeCategoryCommands": 0,
+  "startCommands": 26,
+  "addCategoryCommands": 8,
+  "removeCategoryCommands": 2,
   "addItemCommands": 0,
   "markAsPurchasedCommands": 0,
   "markAsNotPurchasedCommands": 0,
   "activeUsers": [],
-  "errors": 109,
-  "startTime": "2025-03-24T13:17:39.811Z"
+  "errors": 556,
+  "startTime": "2025-03-30T17:28:19.865Z"
 }

@@ -1,16 +1,16 @@
 import { Markup, Scenes } from 'telegraf';
 import { BotContext } from '../types/session';
-import { ShoppingService } from '../../../application/services/ShoppingService';
+import { IShoppingServiceAdapter } from '../adapters/IShoppingServiceAdapter';
 import logger from '../../../infrastructure/logging/Logger';
 import metricsService from '../../../infrastructure/monitoring/FileMetricsService';
-import { Category } from '../../../domain/models/Category';
+import { CategoryDto } from '../../../application/dto/CategoryDto';
 import { MAIN_MENU_SCENE_ID } from './MainMenuScene';
 
 export const MANAGE_CATEGORIES_SCENE_ID = 'MANAGE_CATEGORIES_SCENE';
 export const ADD_CATEGORY_SCENE_ID = 'ADD_CATEGORY_SCENE';
 
 export class ManageCategoriesScene {
-    constructor(private shoppingService: ShoppingService) {}
+    constructor(private shoppingService: IShoppingServiceAdapter) {}
 
     getScene(): Scenes.BaseScene<BotContext> {
         const scene = new Scenes.BaseScene<BotContext>(MANAGE_CATEGORIES_SCENE_ID);
@@ -41,17 +41,14 @@ export class ManageCategoriesScene {
                 const categoryId = ctx.match[1];
                 logger.debug('Запрос на удаление категории', { categoryId });
                 
-                await this.shoppingService.removeCategory(categoryId);
+                await this.shoppingService.removeCategory(ctx.session.userId, categoryId);
                 metricsService.incrementRemoveCategory();
                 
                 await ctx.answerCbQuery('✅ Категория удалена');
                 await ctx.reply('✅ Категория успешно удалена');
                 
                 // Обновляем список категорий
-                const userId = ctx.from?.id.toString();
-                if (userId) {
-                    ctx.session.categories = await this.shoppingService.getCategories(userId);
-                }
+                ctx.session.categories = await this.shoppingService.getCategories(ctx.session.userId);
                 
                 await this.showManageCategoriesMenu(ctx);
             } catch (error) {
@@ -81,7 +78,7 @@ export class ManageCategoriesScene {
             await ctx.reply(
                 'Введите название новой категории ⤵',
                 Markup.inlineKeyboard([
-                    [Markup.button.callback('⬅️ Назад', 'back_to_manage')]
+                    [Markup.button.callback('◀️ Назад', 'back_to_manage')]
                 ])
             );
         });
@@ -90,27 +87,22 @@ export class ManageCategoriesScene {
         scene.on('text', async (ctx) => {
             try {
                 const categoryName = ctx.message.text.trim();
-                const userId = ctx.from.id.toString();
                 
                 if (!categoryName) {
                     await ctx.reply('❌ Название категории не может быть пустым. Пожалуйста, введите название:');
                     return;
                 }
                 
-                logger.debug('Создание новой категории', { categoryName, userId });
+                logger.debug('Создание новой категории', { categoryName, userId: ctx.session.userId });
                 
-                const newCategory: Category = {
-                    name: categoryName,
-                    userId: userId
-                };
-                
-                await this.shoppingService.addCategory(newCategory);
+                // Добавляем новую категорию
+                await this.shoppingService.addCategory(ctx.session.userId, categoryName);
                 metricsService.incrementAddCategory();
                 
                 await ctx.reply(`✅ Категория "${categoryName}" успешно добавлена`);
                 
                 // Обновляем список категорий в сессии
-                ctx.session.categories = await this.shoppingService.getCategories(userId);
+                ctx.session.categories = await this.shoppingService.getCategories(ctx.session.userId);
                 
                 // Возвращаемся в меню управления категориями
                 await ctx.scene.enter(MANAGE_CATEGORIES_SCENE_ID);
@@ -141,7 +133,7 @@ export class ManageCategoriesScene {
                         Markup.button.callback('❌ Удалить категорию', 'remove_category')
                     ],
                     [
-                        Markup.button.callback('⬅️ Назад', 'back_to_main')
+                        Markup.button.callback('◀️ Назад', 'back_to_main')
                     ]
                 ])
             );
@@ -153,25 +145,20 @@ export class ManageCategoriesScene {
 
     private async showDeleteCategoryMenu(ctx: BotContext): Promise<void> {
         try {
-            const userId = ctx.from?.id.toString();
-            if (!userId) {
-                await ctx.reply('❌ Ошибка идентификации пользователя');
-                return;
-            }
-            
             // Получаем или используем категории из сессии
             let categories = ctx.session.categories;
             if (!categories || categories.length === 0) {
-                categories = await this.shoppingService.getCategories(userId);
+                categories = await this.shoppingService.getCategories(ctx.session.userId);
                 ctx.session.categories = categories;
             }
             
             if (categories.length === 0) {
                 await ctx.reply('У вас нет созданных категорий');
                 await ctx.scene.enter(MANAGE_CATEGORIES_SCENE_ID);
+                return;
             }
             
-            const categoryButtons = categories.map(cat => 
+            const categoryButtons = (categories as CategoryDto[]).map(cat => 
                 [Markup.button.callback(cat.name, `delete_category_${cat.id}`)]
             );
             
@@ -179,7 +166,7 @@ export class ManageCategoriesScene {
                 'Выберите категорию для удаления ⤵',
                 Markup.inlineKeyboard([
                     ...categoryButtons,
-                    [Markup.button.callback('⬅️ Назад', 'back_to_manage')]
+                    [Markup.button.callback('◀️ Назад', 'back_to_manage')]
                 ])
             );
         } catch (error) {
@@ -188,4 +175,4 @@ export class ManageCategoriesScene {
             await ctx.scene.enter(MANAGE_CATEGORIES_SCENE_ID);
         }
     }
-} 
+}

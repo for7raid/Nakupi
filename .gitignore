@@ -2,8 +2,12 @@
 /bot-service/node_modules
 /ui-service/node_modules
 
-/bot-service/metrics
-/bot-service/logs
+# logs and metrics
+/bot-service/metrics/*
+/bot-service/logs/*
+/coverage/*
+*.log
+*.json.log
 
 # next.js
 /ui-service/.next/

@@ -6,52 +6,39 @@ interface UserState {
   user: User | null;
   isLoading: boolean;
   error: string | null;
-  saveUser: (userData: Omit<User, 'registrationDate' | 'lastActionDate'>) => Promise<User>;
-  getUser: (userId: string) => Promise<User | null>;
+  getUser: (userId: string) => Promise<void>;
+  saveUser: (user: User) => Promise<void>;
   setUser: (user: User) => void;
-  clearUser: () => void;
 }
 
-export const useUserStore = create<UserState>((set, get) => ({
+export const useUserStore = create<UserState>((set) => ({
   user: null,
   isLoading: false,
   error: null,
-  
-  saveUser: async (userData) => {
-    set({ isLoading: true, error: null });
-    try {
-      const user = await userAPI.saveUser({
-        ...userData,
-        registrationDate: new Date().toISOString(),
-        lastActionDate: new Date().toISOString(),
-      });
-      set({ user, isLoading: false });
-      return user;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Ошибка при сохранении пользователя';
-      set({ error: errorMessage, isLoading: false });
-      throw error;
-    }
-  },
-  
+
   getUser: async (userId) => {
     set({ isLoading: true, error: null });
     try {
       const user = await userAPI.getUser(userId);
       set({ user, isLoading: false });
-      return user;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Ошибка при получении пользователя';
       set({ error: errorMessage, isLoading: false });
-      throw error;
+    }
+  },
+
+  saveUser: async (user) => {
+    set({ isLoading: true, error: null });
+    try {
+      await userAPI.saveUser(user);
+      set({ user, isLoading: false });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Ошибка при сохранении пользователя';
+      set({ error: errorMessage, isLoading: false });
     }
   },
   
   setUser: (user) => {
-    set({ user });
-  },
-  
-  clearUser: () => {
-    set({ user: null });
-  },
+    set({ user, isLoading: false, error: null });
+  }
 })); 

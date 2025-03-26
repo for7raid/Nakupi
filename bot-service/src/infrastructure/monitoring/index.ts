@@ -1,4 +1,3 @@
-import { MetricsRepository } from '../repositories/MetricsRepository';
 import MongoMetricsService from './MongoMetricsService';
 import FileMetricsService from './FileMetricsService';
 import { config } from '../../config/config';
@@ -18,18 +17,15 @@ logger.info('Файловый сервис метрик инициализиро
 export async function initializeMongoMetrics(): Promise<MongoMetricsService> {
     try {
         // Проверяем, установлено ли соединение с MongoDB
-        const mongoConnection = MongoConnection.getInstance(
-            config.MONGODB_URI,
-            config.MONGODB_DB_NAME
-        );
+        const mongoConnection = MongoConnection.getInstance();
         
-        if (!mongoConnection.isConnectedToDb()) {
+        if (!mongoConnection.isConnected()) {
             await mongoConnection.connect();
         }
         
         logger.info('Инициализация MongoDB сервиса метрик');
-        const metricsRepository = new MetricsRepository();
-        const mongoMetricsService = new MongoMetricsService(metricsRepository);
+        // Создаем сервис метрик без репозитория в соответствии с DDD
+        const mongoMetricsService = new MongoMetricsService();
         logger.info('MongoDB сервис метрик успешно инициализирован');
         
         return mongoMetricsService;

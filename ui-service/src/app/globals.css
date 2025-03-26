@@ -2,22 +2,99 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Переменные светлой темы */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --primary: #3b82f6;
+  --primary-foreground: #ffffff;
+  --primary-hover: #2563eb;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #1e293b;
+  --border: #e2e8f0;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --card-border: #e2e8f0;
+  --card-shadow: rgba(0, 0, 0, 0.05);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* Переменные темной темы */
+.dark {
+  --background: #0f172a;
+  --foreground: #f8fafc;
+  --primary: #3b82f6;
+  --primary-foreground: #ffffff;
+  --primary-hover: #60a5fa;
+  --secondary: #1e293b;
+  --secondary-foreground: #e2e8f0;
+  --border: #334155;
+  --card: #1e293b;
+  --card-foreground: #f8fafc;
+  --card-border: #334155;
+  --card-shadow: rgba(0, 0, 0, 0.2);
+}
+
+/* Базовые стили для всего документа */
+@layer base {
+  html {
+    @apply antialiased;
+    @apply transition-colors duration-200;
+  }
+  
+  body {
+    @apply bg-background text-foreground;
+    @apply transition-colors duration-200;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  /* Улучшенные скроллбары */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100 dark:bg-gray-800;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400 dark:bg-gray-500;
   }
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /* Стили для контейнеров */
+  .container-app {
+    @apply max-w-4xl mx-auto px-4 sm:px-6;
+  }
+  
+  /* Анимированные переходы */
+  .fade-in {
+    @apply transition-opacity duration-300 ease-in-out opacity-100;
+  }
+  
+  .fade-out {
+    @apply transition-opacity duration-300 ease-in-out opacity-0;
+  }
+  
+  /* Стили форм */
+  .input-field {
+    @apply w-full px-4 py-2 rounded-md border border-gray-300 dark:border-gray-600 
+    focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400
+    bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+    transition-colors duration-200;
+  }
+  
+  .select-field {
+    @apply w-full px-4 py-2 rounded-md border border-gray-300 dark:border-gray-600 
+    focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400
+    bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+    transition-colors duration-200;
+  }
 }
 
 @layer utilities {

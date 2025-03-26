@@ -1,5 +1,7 @@
 # Nakupi Bot Service
 
+![Nakupi Bot Preview](./preview.png)
+
 Сервис Telegram-бота для управления списками покупок. Позволяет создавать категории покупок, добавлять в них товары и отмечать их как купленные/не купленные.
 
 ## Возможности
@@ -34,19 +36,49 @@
 - Node.js 16+ 
 - npm или yarn
 - MongoDB
+- mkcert (для локальной разработки с HTTPS)
+
+### Установка сертификатов для локальной разработки
+
+1. Установите mkcert:
+   - Windows (с помощью Chocolatey):
+     ```bash
+     choco install mkcert
+     ```
+
+2. Установите локальный центр сертификации:
+   ```bash
+   mkcert -install
+   ```
+
+3. Создайте сертификаты для доменов:
+   ```bash
+   mkcert localhost 127.0.0.1 ::1
+   ```
+
+4. Переместите созданные сертификаты в директорию `ui-service/certs/`:
+   ```bash
+   mkdir -p ui-service/certs
+   mv localhost+2.pem ui-service/certs/
+   mv localhost+2-key.pem ui-service/certs/
+   ```
 
 ### Настройка окружения
 
 1. Клонировать репозиторий
 2. Установить зависимости:
-```
+```bash
 npm install
 ```
-3. Создать файл `.env.development` для разработки и `.env.production` для продакшн окружения:
+3. Создать файл `.env.development` для разработки:
 ```
+NODE_ENV=development
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-DATABASE_URI=mongodb://localhost:27017
-DATABASE_NAME=shoppingListDb
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB_NAME=nakupi_dev
+METRICS_FILE_PATH=metrics/bot_metrics.json
+METRICS_STORAGE=mongo
+API_SERVER_PORT=3001
 ```
 
 ### Запуск

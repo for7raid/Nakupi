@@ -10,7 +10,8 @@ const envSchema = z.object({
     MONGODB_URI: z.string(),
     MONGODB_DB_NAME: z.string(),
     METRICS_FILE_PATH: z.string(),
-    METRICS_STORAGE: z.enum(['file', 'mongo']).optional().default('file')
+    METRICS_STORAGE: z.enum(['file', 'mongo']).optional().default('file'),
+    API_SERVER_PORT: z.number().optional().default(3001)
 });
 
 // Функция для загрузки конфигурации
@@ -49,7 +50,8 @@ function loadConfig() {
             MONGODB_URI: process.env.MONGODB_URI,
             MONGODB_DB_NAME: process.env.MONGODB_DB_NAME,
             METRICS_FILE_PATH: process.env.METRICS_FILE_PATH,
-            METRICS_STORAGE: process.env.METRICS_STORAGE
+            METRICS_STORAGE: process.env.METRICS_STORAGE,
+            API_SERVER_PORT: process.env.API_SERVER_PORT ? parseInt(process.env.API_SERVER_PORT, 10) : undefined
         });
         
         console.log(`[CONFIG] Итоговая конфигурация: NODE_ENV=${config.NODE_ENV}, METRICS_STORAGE=${config.METRICS_STORAGE}`);

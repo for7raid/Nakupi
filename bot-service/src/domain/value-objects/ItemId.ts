@@ -1,0 +1,29 @@
+import { Identifier } from './Identifier';
+import { DomainException } from '../exceptions/DomainException';
+
+/**
+ * Value Object для идентификатора товара
+ */
+export class ItemId extends Identifier<string> {
+    /**
+     * Создает новый экземпляр ItemId
+     * @param value Строковое значение идентификатора
+     * @throws DomainException если значение не является валидным идентификатором
+     */
+    private constructor(value: string) {
+        if (!value || value.trim().length === 0) {
+            throw new DomainException('ItemId не может быть пустым');
+        }
+        super(value);
+    }
+
+    /**
+     * Фабричный метод для создания экземпляра ItemId
+     * @param value Строковое значение идентификатора
+     * @returns Новый экземпляр ItemId
+     * @throws DomainException если значение не является валидным идентификатором
+     */
+    public static create(value: string): ItemId {
+        return new ItemId(value);
+    }
+} 

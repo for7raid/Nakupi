@@ -1,9 +1,26 @@
 import { Counter, Registry } from 'prom-client';
-import { MetricsRepository } from '../repositories/MetricsRepository';
-import { Metric, MetricsSnapshot } from '../../domain/models/Metric';
 import logger from '../logging/Logger';
+import { MongoConnection } from '../database/MongoConnection';
 
-export class MongoMetricsService {
+/**
+ * Интерфейс для снимка метрик
+ */
+interface MetricsSnapshot {
+  timestamp: Date;
+  startCommands: number;
+  addCategoryCommands: number;
+  removeCategoryCommands: number;
+  addItemCommands: number;
+  markAsPurchasedCommands: number;
+  markAsNotPurchasedCommands: number;
+  activeUsers: string[];
+  activeUsersCount: number;
+  errors: number;
+  uptime: number;
+  startTime: string;
+}
+
+export default class MongoMetricsService {
   private startTime: Date;
   private activeUsers: Set<string>;
   private saveInterval: NodeJS.Timeout | null = null;
@@ -13,17 +30,35 @@ export class MongoMetricsService {
   private userCreatedCounter!: Counter<string>;
   private dbConnectionCounter!: Counter<string>;
   private listSavedCounter!: Counter<string>;
-  private metricsRepository: MetricsRepository;
+  private mongoConnection: MongoConnection;
+  private metrics: Map<string, number> = new Map();
 
-  constructor(metricsRepository: MetricsRepository) {
+  constructor() {
     this.startTime = new Date();
     this.activeUsers = new Set<string>();
-    this.metricsRepository = metricsRepository;
+    this.mongoConnection = MongoConnection.getInstance();
     
     // Инициализация Prometheus клиента
     this.registry = new Registry();
     
-    // Создаем метрики с проверкой их существования
+    // Создаем метрики
+    this.initializePrometheusMetrics();
+
+    // Загружаем существующие метрики из базы данных
+    this.loadMetrics()
+      .then(() => logger.info('Метрики успешно загружены из MongoDB'))
+      .catch(error => logger.error('Ошибка при загрузке метрик из MongoDB:', error));
+
+    // Запускаем периодическое сохранение метрик
+    this.startPeriodicSave();
+
+    logger.info('Сервис метрик MongoDB инициализирован');
+    
+    // Инициализируем начальные метрики
+    this.initializeMetrics();
+  }
+
+  private initializePrometheusMetrics(): void {
     try {
       // Сначала проверяем, существуют ли метрики в реестре
       let existingMetrics: string[] = [];
@@ -86,23 +121,10 @@ export class MongoMetricsService {
         this.listSavedCounter = this.registry.getSingleMetric('bot_lists_saved_total') as Counter<string>;
       }
       
-      logger.info('Метрики успешно инициализированы');
+      logger.info('Метрики Prometheus успешно инициализированы');
     } catch (error) {
-      logger.error('Ошибка при инициализации метрик:', error);
+      logger.error('Ошибка при инициализации метрик Prometheus:', error);
     }
-
-    // Загружаем существующие метрики из базы данных
-    this.loadMetrics()
-      .then(() => logger.info('Метрики успешно загружены из MongoDB'))
-      .catch(error => logger.error('Ошибка при загрузке метрик из MongoDB:', error));
-
-    // Запускаем периодическое сохранение метрик
-    this.startPeriodicSave();
-
-    logger.info('Сервис метрик MongoDB инициализирован');
-    
-    // Создаем начальные метрики, если они отсутствуют
-    this.initializeMetrics();
   }
 
   private async initializeMetrics(): Promise<void> {
@@ -122,9 +144,9 @@ export class MongoMetricsService {
       ];
       
       for (const key of metricsKeys) {
-        const metric = await this.metricsRepository.getMetric(key);
-        if (!metric) {
-          await this.metricsRepository.updateMetric(key, 0);
+        if (!this.metrics.has(key)) {
+          this.metrics.set(key, 0);
+          await this.updateMetric(key, 0);
           logger.debug(`Создана метрика: ${key}`);
         }
       }
@@ -137,17 +159,18 @@ export class MongoMetricsService {
 
   private async loadMetrics(): Promise<void> {
     try {
-      // Загружаем последние значения метрик из базы данных
-      const startCommandsMetric = await this.metricsRepository.getMetric('startCommands');
-      const addCategoryCommandsMetric = await this.metricsRepository.getMetric('addCategoryCommands');
-      const removeCategoryCommandsMetric = await this.metricsRepository.getMetric('removeCategoryCommands');
-      const addItemCommandsMetric = await this.metricsRepository.getMetric('addItemCommands');
-      const markAsPurchasedCommandsMetric = await this.metricsRepository.getMetric('markAsPurchasedCommands');
-      const markAsNotPurchasedCommandsMetric = await this.metricsRepository.getMetric('markAsNotPurchasedCommands');
-      const errorsMetric = await this.metricsRepository.getMetric('errors');
+      // Загружаем метрики из базы данных
+      const collection = await this.mongoConnection.getCollection('metrics');
+      const metrics = await collection.find().toArray();
+      
+      for (const metric of metrics) {
+        this.metrics.set(metric.name, metric.value);
+      }
       
       // Загружаем последний снимок с активными пользователями
-      const latestSnapshot = await this.metricsRepository.getLatestSnapshot();
+      const snapshotsCollection = await this.mongoConnection.getCollection('metricsSnapshots');
+      const latestSnapshot = await snapshotsCollection.findOne({}, { sort: { timestamp: -1 } });
+      
       if (latestSnapshot) {
         this.activeUsers = new Set(latestSnapshot.activeUsers);
       }
@@ -158,37 +181,58 @@ export class MongoMetricsService {
     }
   }
 
+  private async updateMetric(name: string, value: number): Promise<void> {
+    try {
+      const collection = await this.mongoConnection.getCollection('metrics');
+      await collection.updateOne(
+        { name },
+        { $set: { name, value, updatedAt: new Date() } },
+        { upsert: true }
+      );
+      this.metrics.set(name, value);
+    } catch (error) {
+      logger.error(`Ошибка при обновлении метрики ${name}:`, error);
+    }
+  }
+
+  private async incrementMetric(name: string): Promise<void> {
+    try {
+      const currentValue = this.metrics.get(name) || 0;
+      const newValue = currentValue + 1;
+      await this.updateMetric(name, newValue);
+    } catch (error) {
+      logger.error(`Ошибка при инкрементировании метрики ${name}:`, error);
+    }
+  }
+
+  private async getMetric(name: string): Promise<number> {
+    return this.metrics.get(name) || 0;
+  }
+
   private async saveMetricsSnapshot(): Promise<void> {
     try {
       const uptime = Math.floor((new Date().getTime() - this.startTime.getTime()) / 1000);
       
-      // Получаем актуальные значения метрик из базы данных
-      const startCommandsMetric = await this.metricsRepository.getMetric('startCommands');
-      const addCategoryCommandsMetric = await this.metricsRepository.getMetric('addCategoryCommands');
-      const removeCategoryCommandsMetric = await this.metricsRepository.getMetric('removeCategoryCommands');
-      const addItemCommandsMetric = await this.metricsRepository.getMetric('addItemCommands');
-      const markAsPurchasedCommandsMetric = await this.metricsRepository.getMetric('markAsPurchasedCommands');
-      const markAsNotPurchasedCommandsMetric = await this.metricsRepository.getMetric('markAsNotPurchasedCommands');
-      const errorsMetric = await this.metricsRepository.getMetric('errors');
-      
       // Создаем снимок метрик
       const snapshot: MetricsSnapshot = {
         timestamp: new Date(),
-        startCommands: startCommandsMetric?.value || 0,
-        addCategoryCommands: addCategoryCommandsMetric?.value || 0,
-        removeCategoryCommands: removeCategoryCommandsMetric?.value || 0,
-        addItemCommands: addItemCommandsMetric?.value || 0,
-        markAsPurchasedCommands: markAsPurchasedCommandsMetric?.value || 0,
-        markAsNotPurchasedCommands: markAsNotPurchasedCommandsMetric?.value || 0,
+        startCommands: await this.getMetric('startCommands'),
+        addCategoryCommands: await this.getMetric('addCategoryCommands'),
+        removeCategoryCommands: await this.getMetric('removeCategoryCommands'),
+        addItemCommands: await this.getMetric('addItemCommands'),
+        markAsPurchasedCommands: await this.getMetric('markAsPurchasedCommands'),
+        markAsNotPurchasedCommands: await this.getMetric('markAsNotPurchasedCommands'),
         activeUsers: Array.from(this.activeUsers),
         activeUsersCount: this.activeUsers.size,
-        errors: errorsMetric?.value || 0,
+        errors: await this.getMetric('errors'),
         uptime,
         startTime: this.startTime.toISOString()
       };
       
       // Сохраняем снимок в базу данных
-      await this.metricsRepository.saveSnapshot(snapshot);
+      const snapshotsCollection = await this.mongoConnection.getCollection('metricsSnapshots');
+      await snapshotsCollection.insertOne(snapshot);
+      
       logger.debug('Снимок метрик сохранен в MongoDB');
     } catch (error) {
       logger.error('Ошибка при сохранении снимка метрик в MongoDB:', error);
@@ -207,79 +251,71 @@ export class MongoMetricsService {
   }
 
   public async incrementStartCommand(): Promise<void> {
-    await this.metricsRepository.incrementMetric('startCommands');
+    await this.incrementMetric('startCommands');
     this.startCommandCounter.inc();
     logger.debug('Увеличен счетчик команд /start');
   }
 
   public async incrementAddCategory(): Promise<void> {
-    await this.metricsRepository.incrementMetric('addCategoryCommands');
+    await this.incrementMetric('addCategoryCommands');
   }
 
   public async incrementRemoveCategory(): Promise<void> {
-    await this.metricsRepository.incrementMetric('removeCategoryCommands');
+    await this.incrementMetric('removeCategoryCommands');
   }
 
   public async incrementAddItem(): Promise<void> {
-    await this.metricsRepository.incrementMetric('addItemCommands');
+    await this.incrementMetric('addItemCommands');
   }
 
   public async incrementMarkAsPurchased(): Promise<void> {
-    await this.metricsRepository.incrementMetric('markAsPurchasedCommands');
+    await this.incrementMetric('markAsPurchasedCommands');
   }
 
   public async incrementMarkAsNotPurchased(): Promise<void> {
-    await this.metricsRepository.incrementMetric('markAsNotPurchasedCommands');
+    await this.incrementMetric('markAsNotPurchasedCommands');
   }
 
   public async incrementError(type: string = 'unknown'): Promise<void> {
-    await this.metricsRepository.incrementMetric('errors');
+    await this.incrementMetric('errors');
     this.errorCounter.inc({ type });
     logger.debug('Увеличен счетчик ошибок', { type });
   }
 
   public async incrementUserCreated(): Promise<void> {
-    await this.metricsRepository.incrementMetric('userCreated');
+    await this.incrementMetric('userCreated');
     this.userCreatedCounter.inc();
     logger.debug('Увеличен счетчик созданных пользователей');
   }
 
   public async incrementDbConnection(): Promise<void> {
-    await this.metricsRepository.incrementMetric('dbConnections');
+    await this.incrementMetric('dbConnections');
     this.dbConnectionCounter.inc();
     logger.debug('Увеличен счетчик подключений к базе данных');
   }
 
   public async incrementListSaved(): Promise<void> {
-    await this.metricsRepository.incrementMetric('listsSaved');
+    await this.incrementMetric('listsSaved');
     this.listSavedCounter.inc();
     logger.debug('Увеличен счетчик сохраненных списков');
   }
 
   public async getMetrics(): Promise<any> {
     const uptime = Math.floor((new Date().getTime() - this.startTime.getTime()) / 1000);
-    
-    // Получаем актуальные значения метрик из базы данных
-    const startCommandsMetric = await this.metricsRepository.getMetric('startCommands');
-    const addCategoryCommandsMetric = await this.metricsRepository.getMetric('addCategoryCommands');
-    const removeCategoryCommandsMetric = await this.metricsRepository.getMetric('removeCategoryCommands');
-    const addItemCommandsMetric = await this.metricsRepository.getMetric('addItemCommands');
-    const markAsPurchasedCommandsMetric = await this.metricsRepository.getMetric('markAsPurchasedCommands');
-    const markAsNotPurchasedCommandsMetric = await this.metricsRepository.getMetric('markAsNotPurchasedCommands');
-    const errorsMetric = await this.metricsRepository.getMetric('errors');
-    
     return {
-      startCommands: startCommandsMetric?.value || 0,
-      addCategoryCommands: addCategoryCommandsMetric?.value || 0,
-      removeCategoryCommands: removeCategoryCommandsMetric?.value || 0,
-      addItemCommands: addItemCommandsMetric?.value || 0,
-      markAsPurchasedCommands: markAsPurchasedCommandsMetric?.value || 0,
-      markAsNotPurchasedCommands: markAsNotPurchasedCommandsMetric?.value || 0,
-      activeUsers: Array.from(this.activeUsers),
-      activeUsersCount: this.activeUsers.size,
-      errors: errorsMetric?.value || 0,
+      startTime: this.startTime,
       uptime,
-      startTime: this.startTime.toISOString()
+      activeUsers: this.activeUsers.size,
+      startCommands: await this.getMetric('startCommands'),
+      addCategoryCommands: await this.getMetric('addCategoryCommands'),
+      removeCategoryCommands: await this.getMetric('removeCategoryCommands'),
+      addItemCommands: await this.getMetric('addItemCommands'),
+      markAsPurchasedCommands: await this.getMetric('markAsPurchasedCommands'),
+      markAsNotPurchasedCommands: await this.getMetric('markAsNotPurchasedCommands'),
+      errors: await this.getMetric('errors'),
+      userCreated: await this.getMetric('userCreated'),
+      dbConnections: await this.getMetric('dbConnections'),
+      listsSaved: await this.getMetric('listsSaved')
     };
   }
 
@@ -287,7 +323,7 @@ export class MongoMetricsService {
     try {
       return await this.registry.metrics();
     } catch (error) {
-      logger.error('Ошибка при получении Prometheus метрик:', error);
+      logger.error('Ошибка при получении метрик Prometheus:', error);
       return '';
     }
   }
@@ -295,9 +331,12 @@ export class MongoMetricsService {
   public stop(): void {
     if (this.saveInterval) {
       clearInterval(this.saveInterval);
-      this.saveMetricsSnapshot();
+      this.saveInterval = null;
     }
+    
+    // Сохраняем последний снимок перед остановкой
+    this.saveMetricsSnapshot()
+      .then(() => logger.info('Последний снимок метрик сохранен при остановке'))
+      .catch(error => logger.error('Ошибка при сохранении последнего снимка метрик:', error));
   }
 } 
-
-export default MongoMetricsService; 

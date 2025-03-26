@@ -1,12 +1,8 @@
 import { Telegraf, session, Scenes } from 'telegraf';
 import LocalSession from 'telegraf-session-local';
-import { ShoppingService } from '../../application/services/ShoppingService';
-import { CategoryRepository } from '../../infrastructure/repositories/CategoryRepository';
-import { ItemRepository } from '../../infrastructure/repositories/ItemRepository';
-import { UserRepository } from '../../infrastructure/repositories/UserRepository';
-import { BotContext, SceneSessionData } from './types/session';
-import logger from '../../infrastructure/logging/Logger';
-import metricsService from '../../infrastructure/monitoring/FileMetricsService';
+import { BotContext, BotSession } from './types/session';
+import logger from '@infrastructure/logging/Logger';
+import metricsService from '@infrastructure/monitoring/FileMetricsService';
 import { MainMenuScene, MAIN_MENU_SCENE_ID } from './scenes/MainMenuScene';
 import { 
     ManageCategoriesScene, 
@@ -18,28 +14,32 @@ import {
     CATEGORY_SCENE_ID, 
     SHOW_PURCHASED_SCENE_ID 
 } from './scenes/CategoryScene';
+import { DiContainer } from '@application/di/DiContainer';
+import { ShoppingListApplicationService } from '@application/services/ShoppingListApplicationService';
+import { UserApplicationService } from '@application/services/UserApplicationService';
+import { CategoryDto } from '@application/dto/CategoryDto';
+import { ShoppingListItemDto } from '@application/dto/ShoppingListItemDto';
+import { ShoppingServiceAdapter } from './adapters/ShoppingServiceAdapter';
+import { IShoppingServiceAdapter } from './adapters/IShoppingServiceAdapter';
 
 export class TelegramBot {
     private bot: Telegraf<BotContext>;
     private stage!: Scenes.Stage<BotContext>;
-    private shoppingService: ShoppingService;
+    private shoppingListService: ShoppingListApplicationService;
+    private userService: UserApplicationService;
+    private diContainer: DiContainer;
 
     constructor(token: string) {
         if (!token) {
             throw new Error('Токен бота не предоставлен');
         }
 
-        // Инициализация репозиториев
-        const categoryRepository = new CategoryRepository();
-        const itemRepository = new ItemRepository();
-        const userRepository = new UserRepository();
-
-        // Инициализация сервиса
-        this.shoppingService = new ShoppingService(
-            categoryRepository,
-            itemRepository,
-            userRepository
-        );
+        // Получаем контейнер зависимостей
+        this.diContainer = DiContainer.getInstance();
+        
+        // Получаем сервисы приложения
+        this.shoppingListService = this.diContainer.get<ShoppingListApplicationService>('shoppingListApplicationService');
+        this.userService = this.diContainer.get<UserApplicationService>('userApplicationService');
 
         // Создание бота
         this.bot = new Telegraf<BotContext>(token);
@@ -71,7 +71,7 @@ export class TelegramBot {
                 ctx.session = {
                     userId: '',
                     userName: '',
-                    currentCategoryId: null,
+                    currentCategoryId: '',
                     categories: [],
                     items: []
                 };
@@ -103,8 +103,32 @@ export class TelegramBot {
                 logger.info('Получена команда /start', { userId: ctx.from.id });
                 metricsService.incrementStartCommand();
                 
+                const userId = ctx.from.id.toString();
+                
+                // Проверяем, существует ли пользователь в базе данных
+                const existingUser = await this.userService.getUserById(userId);
+                const isNewUser = !existingUser;
+                
                 // Сохраняем информацию о пользователе
                 await this.saveUserInfo(ctx);
+                
+                // Показываем приветственное сообщение
+                if (isNewUser) {
+                    // Для нового пользователя - полное приветствие
+                    await ctx.reply(
+                        `👋 Здравствуйте, ${ctx.from.first_name || 'дорогой пользователь'}!\n\n` +
+                        `🛒 Добро пожаловать в Nakupi - бот для ведения списка покупок.\n\n` +
+                        `С помощью этого бота вы можете:\n` +
+                        `✅ Создавать категории товаров\n` +
+                        `✅ Добавлять товары в список покупок\n` +
+                        `✅ Отмечать купленные товары\n` +
+                        `✅ Делиться списками с другими пользователями\n\n` +
+                        `Используйте меню ниже, чтобы начать работу!`
+                    );
+                } else {
+                    // Для существующего пользователя - простое приветствие
+                    await ctx.reply(`👋 С возвращением, ${ctx.from.first_name || 'дорогой пользователь'}!`);
+                }
                 
                 // Переходим в главное меню
                 await ctx.scene.enter(MAIN_MENU_SCENE_ID);
@@ -142,19 +166,25 @@ export class TelegramBot {
 
     private initScenes(): void {
         try {
+            const shoppingServiceAdapter: IShoppingServiceAdapter = new ShoppingServiceAdapter(
+                this.shoppingListService,
+                this.userService
+            );
+
             // Создаем экземпляры обработчиков сцен
-            const mainMenuScene = new MainMenuScene(this.shoppingService);
-            const manageCategoriesScene = new ManageCategoriesScene(this.shoppingService);
-            const categoryScene = new CategoryScene(this.shoppingService);
+            const mainMenuScene = new MainMenuScene(shoppingServiceAdapter);
+            const manageCategoriesScene = new ManageCategoriesScene(shoppingServiceAdapter);
+            const categoryScene = new CategoryScene(shoppingServiceAdapter);
 
             // Получаем экземпляры всех сцен
-            
             const scenes = [
                 mainMenuScene.getScene(),
+                mainMenuScene.getJoinListScene(),
                 manageCategoriesScene.getScene(),
                 manageCategoriesScene.getAddCategoryScene(),
                 categoryScene.getCategoryScene(),
-                categoryScene.getShowPurchasedScene()
+                categoryScene.getShowPurchasedScene(),
+                categoryScene.getManageAccessScene()
             ];
 
             // Создаем Stage с добавлением всех сцен
@@ -186,25 +216,25 @@ export class TelegramBot {
                 ctx.session = {
                     userId: '',
                     userName: '',
-                    currentCategoryId: null,
+                    currentCategoryId: '',
                     categories: [],
                     items: []
                 };
             }
 
             // Сохраняем в базе данных
-            await this.shoppingService.saveUser({
-                id: userId,
-                name: userName
-            });
+            await this.userService.registerUser(userId, userName);
+            
+            // Отмечаем активность пользователя
+            await this.userService.markUserActivity(userId);
 
             // Сохраняем в сессии
             ctx.session.userId = userId;
             ctx.session.userName = userName;
 
             // Загружаем категории пользователя в сессию
-            ctx.session.categories = await this.shoppingService.getCategories(userId);
-            ctx.session.items = await this.shoppingService.getItems(userId);
+            ctx.session.categories = await this.shoppingListService.getCategories(userId) as any[];
+            ctx.session.items = await this.shoppingListService.getItems(userId) as any[];
 
             logger.debug('Информация о пользователе сохранена', {
                 userId,
@@ -219,52 +249,81 @@ export class TelegramBot {
     }
 
     public async start() {
-        try {
-            // Обработка graceful shutdown
-            const stopBot = () => {
-                logger.info('Получен сигнал завершения работы, останавливаем бота...');
-                this.stop('SIGINT');
-                process.exit(0);
-            };
+        const maxAttempts = 3;
+        let attempts = 0;
+        let lastError: unknown;
 
-            // Регистрируем обработчики сигналов
-            process.once('SIGINT', stopBot);
-            process.once('SIGTERM', stopBot);
+        while (attempts < maxAttempts) {
+            try {
+                // Инициализируем контейнер зависимостей, если еще не инициализирован
+                if (!this.shoppingListService || !this.userService) {
+                    await this.diContainer.initialize();
+                    this.shoppingListService = this.diContainer.get<ShoppingListApplicationService>('shoppingListApplicationService');
+                    this.userService = this.diContainer.get<UserApplicationService>('userApplicationService');
+                }
 
-            // Запускаем бота
-            await this.bot.launch();
-            logger.info('Бот запущен и готов к работе', {
-                service: 'bot-service',
-                timestamp: new Date().toISOString()
-            });
-            metricsService.incrementStartCommand();
-        } catch (error: unknown) {
-            logger.error('Ошибка при запуске бота:', error);
-            metricsService.incrementError();
-            
-            // Если ошибка связана с конфликтом экземпляров
-            if (error && typeof error === 'object' && 'description' in error && 
-                typeof error.description === 'string' && 
-                error.description.includes('terminated by other getUpdates request')) {
-                logger.error('Обнаружен конфликт: другой экземпляр бота уже запущен');
-                process.exit(1);
+                // Если это повторная попытка, делаем небольшую паузу 
+                if (attempts > 0) {
+                    logger.info(`Повторная попытка запуска бота (${attempts}/${maxAttempts})...`);
+                    // Ждем 2 секунды перед повторной попыткой
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+
+                // Запускаем бота
+                await this.bot.launch();
+                logger.info('Бот запущен и готов к работе', {
+                    service: 'bot-service',
+                    timestamp: new Date().toISOString()
+                });
+                metricsService.incrementStartCommand();
+                return; // Успешно запустились, выходим из цикла
+            } catch (error: unknown) {
+                lastError = error;
+                attempts++;
+                
+                // Если ошибка связана с конфликтом экземпляров
+                if (error && typeof error === 'object' && 'description' in error && 
+                    typeof error.description === 'string' && 
+                    error.description.includes('terminated by other getUpdates request')) {
+                    
+                    if (attempts < maxAttempts) {
+                        logger.warn(`Обнаружен конфликт: другой экземпляр бота уже запущен. Попытка ${attempts}/${maxAttempts}`);
+                        // Продолжаем и попробуем еще раз после паузы
+                        continue;
+                    } else {
+                        logger.error(`Не удалось запустить бота после ${maxAttempts} попыток из-за конфликта экземпляров`);
+                        // Выходим в случае превышения лимита попыток
+                        process.exit(1);
+                    }
+                } else {
+                    // Другие ошибки просто логируем и выбрасываем
+                    logger.error('Ошибка при запуске бота:', error);
+                    metricsService.incrementError();
+                    throw error;
+                }
             }
-            
-            throw error;
         }
+
+        // Если мы добрались сюда, значит все попытки были исчерпаны
+        logger.error(`Не удалось запустить бота после ${maxAttempts} попыток`);
+        metricsService.incrementError();
+        throw lastError;
     }
 
     public async stop(signal: string) {
         try {
+            logger.info(`Останавливаем бота (сигнал: ${signal})...`);
+            
+            // Останавливаем бота и ждем завершения
             await this.bot.stop(signal);
-            logger.info('Бот остановлен', {
-                signal,
-                service: 'bot-service',
-                timestamp: new Date().toISOString()
-            });
+            
+            // Дополнительная пауза для гарантированного освобождения ресурсов
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            logger.info('Бот успешно остановлен');
         } catch (error) {
             logger.error('Ошибка при остановке бота:', error);
-            throw error;
+            metricsService.incrementError();
         }
     }
 } 

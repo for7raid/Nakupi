@@ -1,41 +1,68 @@
 import { Markup, Scenes } from 'telegraf';
 import { BotContext } from '../types/session';
-import { ShoppingService } from '../../../application/services/ShoppingService';
+import { IShoppingServiceAdapter } from '../adapters/IShoppingServiceAdapter';
 import logger from '../../../infrastructure/logging/Logger';
-import metricsService from '../../../infrastructure/monitoring';
-import { Category } from '../../../domain/models/Category';
-import { ShoppingListItem } from '../../../domain/models/ShoppingListItem';
+import metricsService from '../../../infrastructure/monitoring/FileMetricsService';
 import { MAIN_MENU_SCENE_ID } from './MainMenuScene';
+import { ShoppingListItemDto } from '../../../application/dto/ShoppingListItemDto';
+import { CategoryDto } from '../../../application/dto/CategoryDto';
 
 export const CATEGORY_SCENE_ID = 'CATEGORY_SCENE';
 export const SHOW_PURCHASED_SCENE_ID = 'SHOW_PURCHASED_SCENE';
+export const MANAGE_ACCESS_SCENE_ID = 'MANAGE_ACCESS_SCENE';
 
 interface CategorySceneState {
     showPurchased: boolean;
 }
 
+interface ManageAccessSceneState {
+    users: { id: string, isOwner: boolean }[];
+}
+
 export class CategoryScene {
-    constructor(private shoppingService: ShoppingService) {}
+    constructor(private shoppingService: IShoppingServiceAdapter) {}
 
     getCategoryScene(): Scenes.BaseScene<BotContext> {
         const scene = new Scenes.BaseScene<BotContext>(CATEGORY_SCENE_ID);
 
         // Обработчик входа в сцену
         scene.enter(async (ctx) => {
-            logger.debug('Вход в сцену категории');
-            
-            // Инициализируем состояние сцены, если его нет
-            if (!ctx.scene.state) {
-                ctx.scene.state = {} as CategorySceneState;
-            }
-            
-            // Устанавливаем флаг показа купленных элементов на false при входе
-            const state = ctx.scene.state as CategorySceneState;
-            if (state.showPurchased === undefined) {
+            try {
+                const state = ctx.scene.state as CategorySceneState;
                 state.showPurchased = false;
+                
+                const currentCategoryId = ctx.session.currentCategoryId;
+                if (!currentCategoryId) {
+                    logger.error('ID категории не найден в сессии');
+                    await ctx.reply('❌ Категория не найдена');
+                    void ctx.scene.enter(CATEGORY_SCENE_ID);
+                    return;
+                }
+                
+                // Синхронизируем общие списки перед отображением
+                try {
+                    // Проверяем, является ли категория общей
+                    const categories = ctx.session.categories as CategoryDto[];
+                    const currentCategory = categories.find(cat => cat.id === currentCategoryId);
+                    
+                    if (currentCategory && currentCategory.name.includes('(общий)')) {
+                        await ctx.reply('🔄 Синхронизация списка...');
+                        await this.shoppingService.syncSharedListItems(ctx.session.userId, currentCategoryId);
+                        
+                        // Обновляем список элементов после синхронизации
+                        ctx.session.items = await this.shoppingService.getItems(ctx.session.userId);
+                    }
+                } catch (syncError) {
+                    logger.error('Ошибка при синхронизации общего списка:', syncError);
+                    // Продолжаем, даже если синхронизация не удалась
+                }
+                
+                await this.showCategoryMenu(ctx);
+            } catch (error) {
+                logger.error('Ошибка при входе в сцену категории:', error);
+                await ctx.reply('❌ Произошла ошибка при загрузке категории. Пожалуйста, попробуйте позже.');
+                void ctx.scene.enter(CATEGORY_SCENE_ID);
             }
-            
-            await this.showCategoryMenu(ctx);
         });
 
         // Обработчик кнопки "Добавить элемент"
@@ -79,6 +106,13 @@ export class CategoryScene {
             await this.showCategoryMenu(ctx);
         });
         
+        // Обработчик информации о товаре
+        scene.action(/item_info_(.+)/, async (ctx) => {
+            const itemId = ctx.match[1];
+            logger.debug('Запрос информации о товаре', { itemId });
+            await this.handleItemInfoClick(ctx, itemId);
+        });
+        
         // Обработчик toggle элемента (отметка о покупке)
         scene.action(/toggle_item_(.+)/, async (ctx) => {
             try {
@@ -87,128 +121,34 @@ export class CategoryScene {
                 await ctx.answerCbQuery();
                 
                 // Находим элемент в списке
-                const itemIndex = ctx.session.items.findIndex((item: ShoppingListItem) => item.id === itemId);
+                const itemIndex = (ctx.session.items as ShoppingListItemDto[])
+                    .findIndex((item) => item.id === itemId);
+
                 if (itemIndex !== -1) {
                     const item = ctx.session.items[itemIndex];
                     
                     // Если элемент отмечен как купленный, возвращаем его в список некупленных
                     if (item.purchased) {
-                        // Просто меняем статус
-                        await this.shoppingService.markAsNotPurchased(itemId);
-                        ctx.session.items[itemIndex].purchased = false;
+                        // Возвращаем товар в некупленные с тем же количеством
+                        await this.shoppingService.markItemAsNotPurchased(ctx.session.userId, itemId);
+                        ctx.session.items = await this.shoppingService.getItems(ctx.session.userId);
                     } else {
-                        // Элемент не купленный, нужно отметить его как купленный
-                        
-                        // Если количество больше 1, уменьшаем на 1 и создаем новый элемент или добавляем к существующему
+                        // Уменьшаем количество в некупленном товаре
                         if (item.quantity > 1) {
-                            // Уменьшаем количество текущего элемента
-                            const newQuantity = item.quantity - 1;
-                            ctx.session.items[itemIndex].quantity = newQuantity;
-                            await this.shoppingService.updateItemQuantity(itemId, newQuantity);
-                            
-                            // Проверяем, есть ли уже купленный товар с таким же названием в этой категории
-                            const existingPurchasedItems = ctx.session.items.filter(
-                                (existingItem: ShoppingListItem) => 
-                                    existingItem.name === item.name && 
-                                    existingItem.purchased === true && 
-                                    existingItem.categoryId === item.categoryId
+                            await this.shoppingService.updateItemQuantity(
+                                ctx.session.userId,
+                                itemId,
+                                item.quantity - 1
                             );
                             
-                            if (existingPurchasedItems.length > 0) {
-                                // Берем первый существующий купленный товар и увеличиваем его количество
-                                const existingItem = existingPurchasedItems[0];
-                                const existingItemIndex = ctx.session.items.findIndex(
-                                    (i: ShoppingListItem) => i.id === existingItem.id
-                                );
-                                
-                                const updatedQuantity = existingItem.quantity + 1;
-                                ctx.session.items[existingItemIndex].quantity = updatedQuantity;
-                                await this.shoppingService.updateItemQuantity(
-                                    existingItem.id as string, 
-                                    updatedQuantity
-                                );
-                                
-                                // Если есть другие дубликаты этого товара в купленных, удаляем их после увеличения количества первого
-                                if (existingPurchasedItems.length > 1) {
-                                    for (let i = 1; i < existingPurchasedItems.length; i++) {
-                                        const duplicateId = existingPurchasedItems[i].id;
-                                        if (duplicateId) {
-                                            await this.shoppingService.removeItem(duplicateId);
-                                            // Удаляем из локального списка
-                                            const duplicateIndex = ctx.session.items.findIndex(
-                                                (item: ShoppingListItem) => item.id === duplicateId
-                                            );
-                                            if (duplicateIndex !== -1) {
-                                                ctx.session.items.splice(duplicateIndex, 1);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Создаем новый элемент с количеством 1 и отмечаем его как купленный
-                                const newPurchasedItem: ShoppingListItem = {
-                                    name: item.name,
-                                    quantity: 1,
-                                    purchased: true,
-                                    userId: item.userId,
-                                    categoryId: item.categoryId
-                                };
-                                
-                                // Добавляем в базу данных
-                                const addedItem = await this.shoppingService.addItem(newPurchasedItem);
-                                ctx.session.items.push(addedItem);
-                            }
+                            // Отмечаем текущий товар как купленный
+                            await this.shoppingService.markItemAsPurchased(ctx.session.userId, itemId);
                         } else {
-                            // Если количество = 1, просто отмечаем как купленный
-                            // Но сначала проверяем, нет ли уже такого товара в купленных
-                            const existingPurchasedItems = ctx.session.items.filter(
-                                (existingItem: ShoppingListItem) => 
-                                    existingItem.name === item.name && 
-                                    existingItem.purchased === true && 
-                                    existingItem.categoryId === item.categoryId
-                            );
-                            
-                            if (existingPurchasedItems.length > 0) {
-                                // Если такой товар уже есть в купленных, увеличиваем его количество
-                                // и удаляем текущий
-                                const existingItem = existingPurchasedItems[0];
-                                const existingItemIndex = ctx.session.items.findIndex(
-                                    (i: ShoppingListItem) => i.id === existingItem.id
-                                );
-                                
-                                const updatedQuantity = existingItem.quantity + 1;
-                                ctx.session.items[existingItemIndex].quantity = updatedQuantity;
-                                await this.shoppingService.updateItemQuantity(
-                                    existingItem.id as string, 
-                                    updatedQuantity
-                                );
-                                
-                                // Удаляем текущий товар
-                                await this.shoppingService.removeItem(itemId);
-                                ctx.session.items.splice(itemIndex, 1);
-                                
-                                // Если есть другие дубликаты, удаляем их тоже
-                                if (existingPurchasedItems.length > 1) {
-                                    for (let i = 1; i < existingPurchasedItems.length; i++) {
-                                        const duplicateId = existingPurchasedItems[i].id;
-                                        if (duplicateId) {
-                                            await this.shoppingService.removeItem(duplicateId);
-                                            // Удаляем из локального списка
-                                            const duplicateIndex = ctx.session.items.findIndex(
-                                                (item: ShoppingListItem) => item.id === duplicateId
-                                            );
-                                            if (duplicateIndex !== -1) {
-                                                ctx.session.items.splice(duplicateIndex, 1);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Просто отмечаем текущий товар как купленный
-                                await this.shoppingService.markAsPurchased(itemId);
-                                ctx.session.items[itemIndex].purchased = true;
-                            }
+                            // Если количество равно 1, просто отмечаем как купленный
+                            await this.shoppingService.markItemAsPurchased(ctx.session.userId, itemId);
                         }
+                        
+                        ctx.session.items = await this.shoppingService.getItems(ctx.session.userId);
                     }
                     
                     // Обновляем отображение меню категории
@@ -230,15 +170,17 @@ export class CategoryScene {
                 await ctx.answerCbQuery();
                 
                 // Находим элемент в списке
-                const itemIndex = ctx.session.items.findIndex((item: ShoppingListItem) => item.id === itemId);
+                const itemIndex = (ctx.session.items as ShoppingListItemDto[])
+                    .findIndex((item) => item.id === itemId);
+
                 if (itemIndex !== -1) {
                     const item = ctx.session.items[itemIndex];
                     
                     // Удаляем элемент из базы данных
-                    await this.shoppingService.removeItem(itemId);
+                    await this.shoppingService.removeItem(ctx.session.userId, itemId);
                     
-                    // Удаляем элемент из сессии
-                    ctx.session.items.splice(itemIndex, 1);
+                    // Обновляем список элементов в сессии
+                    ctx.session.items = await this.shoppingService.getItems(ctx.session.userId);
                     
                     await ctx.reply(`✅ Элемент "${item.name}" удален`);
                     
@@ -249,65 +191,103 @@ export class CategoryScene {
                 }
             } catch (error) {
                 logger.error('Ошибка при удалении элемента:', error);
-                await ctx.reply('❌ Произошла ошибка при удалении элемента. Пожалуйста, попробуйте позже.');
+                await ctx.reply('❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
             }
         });
-        
-        // Обработчик текстовых сообщений для добавления элемента
+
+        // Обработчик текстовых сообщений
         scene.on('text', async (ctx) => {
-            if (!ctx.session.waitingForItemInput) {
-                return; // Если не ожидаем ввод, игнорируем сообщение
+            // Если ожидаем ввода нового элемента
+            if (ctx.session.waitingForItemInput) {
+                try {
+                    const input = ctx.message.text.trim();
+                    
+                    // Проверяем валидность ввода
+                    if (!input) {
+                        await ctx.reply('❌ Пожалуйста, введите название элемента');
+                        return;
+                    }
+
+                    // Парсим введенные данные
+                    const [name, quantityStr] = input.split(',').map(s => s.trim());
+                    
+                    // Проверяем наличие всех необходимых данных
+                    if (!name || !quantityStr) {
+                        await ctx.reply('❌ Пожалуйста, введите название и количество через запятую (например: Молоко, 2, л)');
+                        return;
+                    }
+                    
+                    // Проверяем корректность количества
+                    const quantity = parseFloat(quantityStr);
+                    if (isNaN(quantity) || quantity <= 0) {
+                        await ctx.reply('❌ Пожалуйста, введите корректное количество (например: Молоко, 2, л)');
+                        return;
+                    }
+                    
+                    const currentCategoryId = ctx.session.currentCategoryId;
+                    
+                    // Добавляем новый элемент
+                    await this.shoppingService.addItem(
+                        ctx.session.userId,
+                        currentCategoryId as string,
+                        name,
+                        quantity
+                    );
+                    
+                    // Обновляем список элементов
+                    ctx.session.items = await this.shoppingService.getItems(ctx.session.userId);
+                    
+                    await ctx.reply(`✅ Элемент "${name}" (${quantity}) добавлен`);
+                    
+                    // Сбрасываем флаг ожидания ввода
+                    ctx.session.waitingForItemInput = false;
+                    
+                    // Показываем обновленное меню категории
+                    await this.showCategoryMenu(ctx);
+                } catch (error) {
+                    logger.error('Ошибка при добавлении элемента:', error);
+                    await ctx.reply('❌ Не удалось добавить элемент. Пожалуйста, попробуйте позже.');
+                }
             }
-            
-            const text = ctx.message.text;
-            logger.debug('Получен ввод для нового элемента', { text });
-            
+        });
+
+        // Обработчик кнопки "Поделиться списком"
+        scene.action('share_list', async (ctx) => {
             try {
-                // Разбираем ввод на название и количество
-                const parts = text.split(',').map(part => part.trim());
-                const name = parts[0];
-                const quantity = parseInt(parts[1], 10) || 1;
+                logger.debug('Выбрано действие "Поделиться списком"');
+                await ctx.answerCbQuery();
                 
-                if (!name) {
-                    await ctx.reply('❌ Пожалуйста, введите название элемента');
-                    return;
-                }
+                const currentCategoryId = ctx.session.currentCategoryId;
                 
-                const userId = ctx.from?.id.toString();
-                const categoryId = ctx.session.currentCategoryId;
+                // Генерируем случайный код доступа (8 символов)
+                const shareCode = Math.random().toString(36).substring(2, 10).toUpperCase();
                 
-                if (!userId || !categoryId) {
-                    await ctx.reply('❌ Ошибка идентификации пользователя или категории');
-                    return;
-                }
+                // Сохраняем код доступа в базе данных
+                await this.shoppingService.createShareCode(ctx.session.userId, currentCategoryId as string, shareCode);
                 
-                // Создаем новый элемент
-                const newItem: ShoppingListItem = {
-                    name,
-                    quantity,
-                    purchased: false,
-                    userId,
-                    categoryId
-                };
-                
-                // Добавляем в базу данных
-                const addedItem = await this.shoppingService.addItem(newItem);
-                
-                // Обновляем локальное состояние
-                if (!ctx.session.items) {
-                    ctx.session.items = [];
-                }
-                ctx.session.items.push(addedItem);
-                
-                // Сбрасываем флаг ожидания ввода
-                ctx.session.waitingForItemInput = false;
-                
-                await ctx.reply(`✅ Элемент "${name}" (${quantity}) добавлен`);
-                await this.showCategoryMenu(ctx);
+                // Отправляем сообщение с кодом доступа
+                await ctx.reply(
+                    `🔗 Код для доступа к списку создан!\n\n` +
+                    `Поделитесь этим кодом с друзьями: <code>${shareCode}</code>\n\n` +
+                    `Для доступа к списку, им нужно нажать на кнопку "Присоединиться к списку" в главном меню и ввести этот код.`,
+                    {
+                        parse_mode: 'HTML',
+                        ...Markup.inlineKeyboard([
+                            [Markup.button.callback('◀️ Назад', 'back_to_category')]
+                        ])
+                    }
+                );
             } catch (error) {
-                logger.error('Ошибка при добавлении элемента:', error);
-                await ctx.reply('❌ Произошла ошибка. Пожалуйста, проверьте формат ввода и попробуйте снова.');
+                logger.error('Ошибка при создании кода доступа:', error);
+                await ctx.reply('❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
             }
+        });
+
+        // Обработчик кнопки управления доступом
+        scene.action('manage_access', async (ctx) => {
+            logger.debug('Выбрано управление доступом');
+            await ctx.answerCbQuery();
+            return ctx.scene.enter(MANAGE_ACCESS_SCENE_ID);
         });
 
         return scene;
@@ -316,94 +296,290 @@ export class CategoryScene {
     getShowPurchasedScene(): Scenes.BaseScene<BotContext> {
         const scene = new Scenes.BaseScene<BotContext>(SHOW_PURCHASED_SCENE_ID);
 
-        // Обработчик входа в сцену - просто перенаправляем в основную сцену с флагом showPurchased
+        // Обработчик входа в сцену
         scene.enter(async (ctx) => {
             logger.debug('Вход в сцену отображения купленных элементов');
-            
-            // Перенаправляем в основную сцену и устанавливаем флаг
-            ctx.scene.state = { showPurchased: true } as CategorySceneState;
+            await this.showPurchasedItems(ctx);
+        });
+
+        // Обработчик кнопки "Назад"
+        scene.action('back_to_category', async (ctx) => {
+            logger.debug('Возврат к категории');
+            await ctx.answerCbQuery();
             await ctx.scene.enter(CATEGORY_SCENE_ID);
         });
 
         return scene;
     }
 
+    getManageAccessScene(): Scenes.BaseScene<BotContext> {
+        const scene = new Scenes.BaseScene<BotContext>(MANAGE_ACCESS_SCENE_ID);
+        
+        // Обработчик входа в сцену
+        scene.enter(async (ctx) => {
+            try {
+                const currentCategoryId = ctx.session.currentCategoryId;
+                if (!currentCategoryId) {
+                    logger.error('ID категории не найден в сессии');
+                    await ctx.reply('❌ Категория не найдена');
+                    void ctx.scene.enter(CATEGORY_SCENE_ID);
+                    return;
+                }
+                
+                // Получаем категорию для проверки
+                const categories = ctx.session.categories as CategoryDto[];
+                const currentCategory = categories.find(cat => cat.id === currentCategoryId);
+                
+                if (!currentCategory) {
+                    logger.error('Категория не найдена в сессии', { categoryId: currentCategoryId });
+                    await ctx.reply('❌ Категория не найдена');
+                    void ctx.scene.enter(CATEGORY_SCENE_ID);
+                    return;
+                }
+                
+                // Проверяем, является ли пользователь владельцем
+                if (currentCategory.userId !== ctx.session.userId) {
+                    await ctx.reply('❌ Только владелец может управлять доступом к списку');
+                    void ctx.scene.enter(CATEGORY_SCENE_ID);
+                    return;
+                }
+                
+                // Инициализируем состояние
+                const state = ctx.scene.state as ManageAccessSceneState;
+                
+                // Получаем список пользователей с доступом
+                state.users = await this.shoppingService.getUsersWithAccess(
+                    ctx.session.userId, 
+                    currentCategoryId
+                );
+                
+                await this.showAccessManagementMenu(ctx, state);
+            } catch (error) {
+                logger.error('Ошибка при входе в сцену управления доступом:', error);
+                await ctx.reply('❌ Произошла ошибка при загрузке управления доступом. Пожалуйста, попробуйте позже.');
+                void ctx.scene.enter(CATEGORY_SCENE_ID);
+            }
+        });
+        
+        // Обработчик отзыва доступа
+        scene.action(/revoke_access_(.+)/, async (ctx) => {
+            try {
+                const targetUserId = ctx.match[1];
+                const currentCategoryId = ctx.session.currentCategoryId;
+                
+                if (!currentCategoryId) {
+                    await ctx.answerCbQuery('Ошибка: категория не найдена');
+                    void ctx.scene.enter(CATEGORY_SCENE_ID);
+                    return;
+                }
+                
+                logger.debug('Отзыв доступа у пользователя', { targetUserId, categoryId: currentCategoryId });
+                
+                // Отзываем доступ
+                await this.shoppingService.revokeListAccess(
+                    ctx.session.userId,
+                    currentCategoryId,
+                    targetUserId
+                );
+                
+                await ctx.answerCbQuery('✅ Доступ успешно отозван');
+                
+                // Обновляем список пользователей
+                const state = ctx.scene.state as ManageAccessSceneState;
+                state.users = await this.shoppingService.getUsersWithAccess(
+                    ctx.session.userId, 
+                    currentCategoryId
+                );
+                
+                await this.showAccessManagementMenu(ctx, state);
+            } catch (error) {
+                logger.error('Ошибка при отзыве доступа:', error);
+                await ctx.answerCbQuery('❌ Произошла ошибка при отзыве доступа');
+            }
+        });
+        
+        // Обработчик кнопки создания кода доступа
+        scene.action('share_list', async (ctx) => {
+            try {
+                const currentCategoryId = ctx.session.currentCategoryId;
+                
+                if (!currentCategoryId) {
+                    await ctx.answerCbQuery('Ошибка: категория не найдена');
+                    void ctx.scene.enter(CATEGORY_SCENE_ID);
+                    return;
+                }
+                
+                // Генерируем случайный код из 8 символов
+                const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+                let shareCode = '';
+                for (let i = 0; i < 8; i++) {
+                    shareCode += characters.charAt(Math.floor(Math.random() * characters.length));
+                }
+                
+                // Сохраняем код для категории
+                await this.shoppingService.createShareCode(ctx.session.userId, currentCategoryId, shareCode);
+                
+                await ctx.answerCbQuery();
+                
+                // Отправляем сообщение с кодом
+                await ctx.reply(
+                    `🔑 <b>Код доступа к списку:</b> <code>${shareCode}</code>\n\n` +
+                    'Отправьте этот код другу, чтобы он мог присоединиться к вашему списку.',
+                    { parse_mode: 'HTML' }
+                );
+                
+                // Возвращаемся к меню управления доступом
+                const state = ctx.scene.state as ManageAccessSceneState;
+                await this.showAccessManagementMenu(ctx, state);
+            } catch (error) {
+                logger.error('Ошибка при создании кода доступа:', error);
+                await ctx.answerCbQuery('❌ Произошла ошибка при создании кода доступа');
+            }
+        });
+        
+        // Обработчик кнопки назад
+        scene.action('back_to_category', async (ctx) => {
+            logger.debug('Возврат в меню категории');
+            await ctx.answerCbQuery();
+            void ctx.scene.enter(CATEGORY_SCENE_ID);
+        });
+        
+        return scene;
+    }
+
     private async showCategoryMenu(ctx: BotContext): Promise<void> {
         try {
-            const userId = ctx.from?.id.toString();
-            if (!userId) {
-                await ctx.reply('❌ Ошибка идентификации пользователя');
-                return;
-            }
-
-            const categoryId = ctx.session.currentCategoryId;
-            if (!categoryId) {
-                await ctx.reply('❌ Категория не выбрана');
-                return;
-            }
-
-            const categories = ctx.session.categories;
-            const currentCategory = categories.find((cat: Category) => cat.id === categoryId);
-            if (!currentCategory) {
-                await ctx.reply('❌ Категория не найдена');
-                return;
-            }
-
-            let allItems = ctx.session.items || [];
-            const categoryItems = allItems.filter((item: ShoppingListItem) => item.categoryId === categoryId);
-            const purchasedItems = categoryItems.filter((item: ShoppingListItem) => item.purchased);
-            const notPurchasedItems = categoryItems.filter((item: ShoppingListItem) => !item.purchased);
-
-            // Инициализируем состояние, если оно отсутствует
-            if (!ctx.scene.state) {
-                ctx.scene.state = { showPurchased: false } as CategorySceneState;
-            }
-            
             const state = ctx.scene.state as CategorySceneState;
-            if (state.showPurchased === undefined) {
-                state.showPurchased = false;
+            const currentCategoryId = ctx.session.currentCategoryId;
+            
+            if (!currentCategoryId) {
+                logger.error('ID категории не найден в сессии');
+                await ctx.reply('❌ Категория не найдена');
+                await ctx.scene.enter(MAIN_MENU_SCENE_ID);
+                return;
             }
             
-            // Определяем, какие элементы показывать
-            const itemsToShow = state.showPurchased ? purchasedItems : notPurchasedItems;
-
-            // Создаем кнопки для элементов с возможностью удаления
-            // Каждый товар теперь занимает отдельную строку с кнопкой удаления
-            const itemButtons = [];
+            // Получаем категорию и элементы
+            const categories = ctx.session.categories as CategoryDto[];
+            const currentCategory = categories.find(cat => cat.id === currentCategoryId);
+            const allItems = ctx.session.items as ShoppingListItemDto[];
             
-            for (const item of itemsToShow) {
-                const status = item.purchased ? '✅' : '⬜️';
-                itemButtons.push([
-                    Markup.button.callback(`${status} ${item.name} (${item.quantity})`, `toggle_item_${item.id}`),
-                    Markup.button.callback('🗑️', `delete_item_${item.id}`)
+            if (!currentCategory) {
+                logger.error('Категория не найдена в сессии', { categoryId: currentCategoryId });
+                await ctx.reply('❌ Категория не найдена');
+                await ctx.scene.enter(MAIN_MENU_SCENE_ID);
+                return;
+            }
+            
+            // Фильтруем элементы текущей категории
+            const items = allItems.filter(item => item.categoryId === currentCategoryId);
+            
+            // Фильтруем купленные/некупленные элементы в зависимости от состояния
+            const filteredItems = state.showPurchased 
+                ? items.filter(item => item.purchased)
+                : items.filter(item => !item.purchased);
+            
+            // Определяем, является ли пользователь владельцем категории
+            const isOwner = currentCategory.userId === ctx.session.userId;
+            
+            // Формируем список элементов
+            let messageText = `📋 <b>${currentCategory.name}</b>\n\n`;
+            
+            if (filteredItems.length === 0) {
+                messageText += state.showPurchased 
+                    ? '😕 Нет купленных товаров' 
+                    : '🛒 Список пуст. Добавьте товары!';
+            } else {
+                if (state.showPurchased) {
+                    messageText += '✅ <b>Купленные товары:</b>\n\n';
+                }
+            }
+            
+            // Считаем количество купленных и общих товаров
+            const purchasedCount = items.filter(item => item.purchased).length;
+            const totalCount = items.length;
+            
+            // Добавляем статистику
+            messageText += `\n📊 Куплено: ${purchasedCount}/${totalCount}`;
+            
+            // Формируем кнопки управления категорией
+            const keyboard = [];
+            
+            // Добавляем кнопки для каждого товара
+            if (filteredItems.length > 0) {
+                filteredItems.forEach((item) => {
+                    const emoji = item.purchased ? '✅' : '⬜';
+                    const buttonText = `${emoji} ${item.name}${item.quantity > 1 ? ` (${item.quantity})` : ''}`;
+                    
+                    keyboard.push([
+                        Markup.button.callback(buttonText, `toggle_item_${item.id}`),
+                        Markup.button.callback('ℹ️', `item_info_${item.id}`),
+                        Markup.button.callback('🗑️', `delete_item_${item.id}`)
+                    ]);
+                });
+            }
+            
+            // Кнопка добавления товара
+            keyboard.push([
+                Markup.button.callback('🛒 Добавить товар', 'add_item')
+            ]);
+            
+            // Кнопки переключения между купленными и некупленными товарами
+            const toggleButtonText = state.showPurchased 
+                ? '📋 Показать некупленные' 
+                : '✅ Показать купленные';
+            
+            keyboard.push([
+                Markup.button.callback(toggleButtonText, 'toggle_purchased')
+            ]);
+            
+            // Если пользователь является владельцем категории, добавляем кнопку "Поделиться списком"
+            if (isOwner) {
+                keyboard.push([
+                    Markup.button.callback('🔗 Поделиться списком', 'share_list'),
+                    Markup.button.callback('👥 Управление доступом', 'manage_access')
                 ]);
             }
-
-            // Готовим текст кнопки переключения режима
-            const toggleButtonText = state.showPurchased 
-                ? '🛒 Показать не купленные' 
-                : '✅ Показать купленные';
-
-            const keyboard = [
-                ...itemButtons,
-                [
-                    Markup.button.callback('➕ Добавить элемент', 'add_item'),
-                    Markup.button.callback(toggleButtonText, 'toggle_purchased')
-                ],
-                [Markup.button.callback('⬅️ Назад', 'back_to_main')]
-            ];
-
-            // Добавляем индикатор текущего режима в заголовок
-            const viewModeText = state.showPurchased 
-                ? '(режим просмотра: купленные)' 
-                : '(режим просмотра: к покупке)';
-
-            await ctx.reply(
-                `📋 ${currentCategory.name} ${viewModeText}\n\n${this.formatItemsList(categoryItems)}`,
-                Markup.inlineKeyboard(keyboard)
-            );
+            
+            // Кнопка возврата в главное меню
+            keyboard.push([
+                Markup.button.callback('◀️ Назад в меню', 'back_to_main')
+            ]);
+            
+            // Отправляем сообщение с кнопками
+            await ctx.reply(messageText, {
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard(keyboard)
+            });
+            
         } catch (error) {
             logger.error('Ошибка при отображении меню категории:', error);
+            await ctx.reply('❌ Произошла ошибка при загрузке меню категории. Пожалуйста, попробуйте позже.');
+            await ctx.scene.enter(MAIN_MENU_SCENE_ID);
+        }
+    }
+
+    private async handleItemInfoClick(ctx: BotContext, itemId: string): Promise<void> {
+        try {
+            const item = (ctx.session.items as ShoppingListItemDto[])
+                .find(item => item.id === itemId);
+            
+            if (!item) {
+                await ctx.reply('❌ Элемент не найден');
+                return;
+            }
+            
+            const message = `ℹ️ Информация о товаре:\n\n` +
+                `Название: ${item.name}\n` +
+                `Количество: ${item.quantity}\n` +
+                `Статус: ${item.purchased ? '✅ Куплен' : '⬜️ Не куплен'}\n` +
+                `Дата добавления: ${new Date(item.createdAt).toLocaleDateString()}`;
+            
+            await ctx.reply(message, Markup.inlineKeyboard([
+                [Markup.button.callback('◀️ Назад', 'back_to_category')]
+            ]));
+        } catch (error) {
+            logger.error('Ошибка при отображении информации о товаре:', error);
             await ctx.reply('❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
         }
     }
@@ -411,9 +587,9 @@ export class CategoryScene {
     private async showAddItemForm(ctx: BotContext): Promise<void> {
         try {
             await ctx.reply(
-                'Введите название элемента и количество через запятую (например: Молоко, 2)',
+                'Введите название, количество и единицу измерения через запятую (например: Молоко, 1.5, л) ⤵',
                 Markup.inlineKeyboard([
-                    [Markup.button.callback('⬅️ Назад', 'back_to_category')]
+                    [Markup.button.callback('◀️ Отмена', 'back_to_category')]
                 ])
             );
         } catch (error) {
@@ -424,41 +600,109 @@ export class CategoryScene {
 
     private async showPurchasedItems(ctx: BotContext): Promise<void> {
         try {
-            // Инициализируем состояние если его нет
-            if (!ctx.scene.state) {
-                ctx.scene.state = {} as CategorySceneState;
+            const currentCategoryId = ctx.session.currentCategoryId;
+            const items = ctx.session.items as ShoppingListItemDto[];
+            const purchasedItems = items.filter(item => 
+                item.categoryId === currentCategoryId && item.purchased
+            );
+            
+            if (purchasedItems.length === 0) {
+                await ctx.reply(
+                    'В этой категории нет купленных элементов',
+                    Markup.inlineKeyboard([
+                        [Markup.button.callback('◀️ Назад', 'back_to_category')]
+                    ])
+                );
+                return;
             }
             
-            const state = ctx.scene.state as CategorySceneState;
-            state.showPurchased = true;
-            await this.showCategoryMenu(ctx);
+            const message = '✅ Купленные элементы:\n\n' +
+                this.formatItemsList(purchasedItems);
+            
+            await ctx.reply(
+                message,
+                Markup.inlineKeyboard([
+                    [Markup.button.callback('◀️ Назад', 'back_to_category')]
+                ])
+            );
         } catch (error) {
             logger.error('Ошибка при отображении купленных элементов:', error);
             await ctx.reply('❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
         }
     }
 
-    private formatItemsList(items: ShoppingListItem[]): string {
-        const purchasedItems = items.filter(item => item.purchased);
-        const notPurchasedItems = items.filter(item => !item.purchased);
-
-        let result = '';
-
-        if (notPurchasedItems.length > 0) {
-            result += '🛒 К покупке:\n';
-            notPurchasedItems.forEach(item => {
-                result += `⬜️ ${item.name} (${item.quantity})\n`;
-            });
-            result += '\n';
+    private formatItemsList(items: ShoppingListItemDto[]): string {
+        if (items.length === 0) {
+            return 'Список пуст';
         }
+        
+        return items.map(item => 
+            `${item.purchased ? '✅' : '⬜️'} ${item.name} (${item.quantity})`
+        ).join('\n');
+    }
 
-        if (purchasedItems.length > 0) {
-            result += '✅ Куплено:\n';
-            purchasedItems.forEach(item => {
-                result += `✅ ${item.name} (${item.quantity})\n`;
+    private async showAccessManagementMenu(ctx: BotContext, state: ManageAccessSceneState): Promise<void> {
+        try {
+            const categories = ctx.session.categories as CategoryDto[];
+            const currentCategory = categories.find(cat => cat.id === ctx.session.currentCategoryId);
+            
+            if (!currentCategory) {
+                await ctx.reply('❌ Категория не найдена');
+                await ctx.scene.enter(CATEGORY_SCENE_ID);
+                return;
+            }
+            
+            // Формируем сообщение
+            let messageText = `👥 <b>Управление доступом к списку "${currentCategory.name}"</b>\n\n`;
+            
+            if (state.users.length <= 1) {
+                messageText += 'К списку пока никто не имеет доступа кроме вас.\n';
+                messageText += 'Для добавления пользователей поделитесь кодом доступа.';
+            } else {
+                messageText += '<b>Пользователи с доступом:</b>\n\n';
+                
+                state.users.forEach(user => {
+                    if (user.isOwner) {
+                        messageText += `👑 ${user.id} (владелец)\n`;
+                    } else {
+                        messageText += `👤 ${user.id}\n`;
+                    }
+                });
+                
+                messageText += '\nЧтобы отозвать доступ, нажмите на кнопку рядом с пользователем.';
+            }
+            
+            // Формируем кнопки
+            const keyboard = [];
+            
+            // Кнопки для отзыва доступа у пользователей (кроме владельца)
+            state.users.forEach(user => {
+                if (!user.isOwner) {
+                    keyboard.push([
+                        Markup.button.callback(`❌ Отозвать доступ у ${user.id}`, `revoke_access_${user.id}`)
+                    ]);
+                }
             });
+            
+            // Кнопка для создания кода доступа
+            keyboard.push([
+                Markup.button.callback('🔗 Создать код доступа', 'share_list')
+            ]);
+            
+            // Кнопка возврата
+            keyboard.push([
+                Markup.button.callback('◀️ Назад к списку', 'back_to_category')
+            ]);
+            
+            // Отправляем сообщение
+            await ctx.reply(messageText, {
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard(keyboard)
+            });
+        } catch (error) {
+            logger.error('Ошибка при отображении меню управления доступом:', error);
+            await ctx.reply('❌ Произошла ошибка при загрузке меню управления доступом. Пожалуйста, попробуйте позже.');
+            await ctx.scene.enter(CATEGORY_SCENE_ID);
         }
-
-        return result;
     }
 } 
